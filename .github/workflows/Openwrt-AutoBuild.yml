@@ -9,16 +9,15 @@
 name: Build OpenWrt
 
 on: 
-  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'target'
+        required: false
+        default: 'mediatek_filogic'
 
 env:
-  REPO_TOKEN: ${{ secrets.TOKEN_KIDDIN9 }}
-  PPPOE_USERNAME: ${{ secrets.PPPOE_USERNAME }}
-  PPPOE_PASSWD: ${{ secrets.PPPOE_PASSWD }}
-  SCKEY: ${{ secrets.SCKEY }}
-  TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-  TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-  SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+  REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
   DOCKER_ID: ${{ secrets.DOCKER_ID }}
   DOCKER_PASSWD: ${{ secrets.DOCKER_PASSWD }}
   TZ: Asia/Shanghai
@@ -31,18 +30,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: ["${{ github.event.client_payload.target }}"]
+        target: ["${{ github.event.inputs.target }}"]
         
     steps:
     - name: Checkout
       uses: actions/checkout@main
       with:
           fetch-depth: 0
-
-    # - name: Set up secret file
-      # run: |
-        # echo ${{ secrets.TELEGRAM_CHAT_ID }} | sed 's/./& /g'
-        # echo ${{ secrets.TELEGRAM_TOKEN }} | sed 's/./& /g'
 
     - name: Load Settings.ini
       run: |
@@ -61,7 +55,7 @@ jobs:
         echo "UPLOAD_FIRMWARE_FOR_RELEASE=${UPLOAD_FIRMWARE_FOR_RELEASE}" >> $GITHUB_ENV
         echo "UPLOAD_FIRMWARE_TO_COWTRANSFER=${UPLOAD_FIRMWARE_TO_COWTRANSFER}" >> $GITHUB_ENV
         echo "UPLOAD_FIRMWARE_TO_WETRANSFER=${UPLOAD_FIRMWARE_TO_WETRANSFER}" >> $GITHUB_ENV
-        sed -i "1a REPO_TOKEN=${{ secrets.TOKEN_KIDDIN9 }}" ${GITHUB_WORKSPACE}/devices/common/diy.sh
+        sed -i "1a REPO_TOKEN=${{ secrets.GITHUB_TOKEN }}" ${GITHUB_WORKSPACE}/devices/common/diy.sh
         sed -i "1a TARGET=${{matrix.target}}" ${GITHUB_WORKSPACE}/devices/common/diy.sh
         if [ ${{matrix.target}} == "x86_64" ]; then
             echo "ARCH=linux/amd64" >> $GITHUB_ENV
@@ -96,17 +90,6 @@ jobs:
           fi
         fi
 
-    - name: Trigger Packages Update
-      continue-on-error: true
-      run: |
-        status=$(curl -H "Authorization: token ${{ secrets.TOKEN_KIDDIN9 }} -s "https://api.github.com/repos/kiddin9/openwrt-packages/actions/runs" | jq -r '.workflow_runs[0].status')
-        if [[ "$status" == "completed" ]]; then
-          curl -X POST https://api.github.com/repos/kiddin9/openwrt-packages/dispatches \
-            -H "Accept: application/vnd.github.everest-preview+json" \
-            -H "Authorization: token ${{ secrets.TOKEN_KIDDIN9 }}" \
-          --data '{"event_type": "update"}'
-        fi
-
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -136,7 +119,7 @@ jobs:
     - name: Clone source code
       run: |
         REPO_BRANCH="$((curl -gs -H 'Content-Type: application/json' \
-           -H "Authorization: Bearer ${{ secrets.TOKEN_KIDDIN9 }}" \
+           -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
            -X POST -d '{ "query": "query {repository(owner: \"openwrt\", name: \"openwrt\") {refs(refPrefix: \"refs/tags/\", last: 4, orderBy: {field: TAG_COMMIT_DATE, direction: ASC}) {edges {node {name}}}}}"}' https://api.github.com/graphql) | jq -r '.data.repository.refs.edges[].node.name' | grep v23 | tail -n 1)"
         #REPO_BRANCH="openwrt-23.05"
         #echo "CONFIG_VERSION_REPO=\"https://dl.openwrt.ai/`echo $REPO_BRANCH  | cut -d . -f 1,2 | sed -e 's/^v//'`\"">>devices/common/.config
@@ -261,7 +244,7 @@ jobs:
         shopt -s extglob
         cd openwrt
         echo -e "$(($(nproc)+1)) thread compile"
-        make -j$(($(nproc)+1)) || make V=s &>build.log || (tail -50 build.log; curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=❌ OpenWrt ${{ env.VERSION }} ${{matrix.target}} 编译失败 😂" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage";df -hT;exit 1)
+        make -j$(($(nproc)+1)) || make V=s &>build.log || (tail -50 build.log;df -hT;exit 1)
         sed -i "s/# CONFIG_IB is not set/CONFIG_IB=y/" .config
         rm -rf staging_dir/toolchain-*/bin/*openwrt-linux-musl-lto-dump
         rm -rf staging_dir/toolchain-*/initial
@@ -286,19 +269,6 @@ jobs:
         echo "NOTICE=请分配不少于1G的存储容量" >> $GITHUB_ENV
         fi
 
-    - name: Deploy imagebuilder to server
-      uses: easingthemes/ssh-deploy@main
-      continue-on-error: true
-      if: env.SSH_PRIVATE_KEY && ! contains(github.event.action, 'noser')
-      with:
-        SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-        ARGS: "-avzr"
-        SOURCE: openwrt/bin/targets
-        REMOTE_HOST: ${{ secrets.SERVER_HOST }}
-        REMOTE_PORT: ${{ secrets.SERVER_PORT }}
-        REMOTE_USER: root
-        TARGET: "/www/wwwroot/dl.openwrt.ai/releases/tmp/"
-
     - name: Upload firmware for artifact
       uses: actions/upload-artifact@main
       if: env.UPLOAD_FIRMWARE_FOR_ARTIFACT == 'true'
@@ -307,54 +277,9 @@ jobs:
         path: |
           openwrt/bin/targets/
 
-    - name: Create release
-      id: create_release
-      if: env.REPO_TOKEN && env.UPLOAD_FIRMWARE_FOR_RELEASE == 'true'
-      continue-on-error: true
-      run: |
-        echo -e "墙内加速下载 🚀:\n" >> release.txt
-        echo -e "[腾讯云] (https://dl.openwrt.ai/firmware/${{matrix.target}}/ ☁)\n" >> release.txt
-        [ ${{ env.WETRANS }} ] && echo -e "[WeTransfer] (${{ env.WETRANS }} 🗽)\n" >> release.txt
-        [ ${{ env.COWURL }} ] && echo -e "[奶牛上传] (${{ env.COWURL }} 🐮)\n" >> release.txt
-        [ ${{ env.NOTICE }} ] && echo -e "${{ env.NOTICE }}" >> release.txt || true
-
-    - name: Upload firmware for release
-      uses: softprops/action-gh-release@master
-      continue-on-error: true
-      if: env.REPO_TOKEN && env.UPLOAD_FIRMWARE_FOR_RELEASE == 'true'
-      env:
-        GITHUB_TOKEN: ${{ secrets.TOKEN_KIDDIN9 }}
-      with:
-        files: "${{ env.FIRMWARE }}/*"
-        name: ${{ env.date2 }} ${{matrix.target}} ${{ env.EMOJI }}
-        tag_name: ${{ env.date }}_${{matrix.target}}
-        body_path: release.txt
-    
-    - name: WeChat notification
-      continue-on-error: true
-      if: env.SCKEY
-      run: |
-        # [ steps.compile.outputs.status == 'success' ] && curl https://sctapi.ftqq.com/${{ secrets.SCKEY }}.send?text=🎉OpenWrt_${{ env.VERSION }}_${{matrix.target}}编译完成😋|| curl https://sctapi.ftqq.com/${{ secrets.SCKEY }}.send?text=❌OpenWrt_${{ env.VERSION }}_${{matrix.target}}编译失败😂
-
-    - name: Telegram notification
-      if: env.TELEGRAM_TOKEN && ! contains(github.event.action, 'notg')
-      continue-on-error: true
-      run: |
-        curl -k --data chat_id="${{ env.TELEGRAM_CHAT_ID }}" --data "text=🎉 OpenWrt ${{ env.VERSION }} ${{matrix.target}} 编译成功 😋  https://dl.openwrt.ai/firmware/${{matrix.target}}/  ${{ env.COWURL }}   ${{ env.WETRANS }} 🚀" "https://api.telegram.org/bot${{ env.TELEGRAM_TOKEN }}/sendMessage"
-
     - name: Delete workflow runs
       uses: GitRML/delete-workflow-runs@main
       continue-on-error: true
       with:
         retain_days: 100
         keep_minimum_runs: 0
-
-    - name: Remove old Releases
-      uses: dev-drprasad/delete-older-releases@master
-      continue-on-error: true
-      if: env.UPLOAD_FIRMWARE_FOR_RELEASE == 'true' && !cancelled()
-      with:
-        keep_latest: 15
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.TOKEN_KIDDIN9 }}
